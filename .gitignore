@@ -7,3 +7,4 @@ config/pg_tileserv*.toml
 server.crt
 server.key
 hugo/.hugo_build.lock
+.idea
