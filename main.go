@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +90,7 @@ func init() {
 	viper.SetDefault("DbPoolMaxConnLifeTime", "1h")
 	viper.SetDefault("DbPoolMaxConns", 4)
 	viper.SetDefault("DbTimeout", 10)
+	viper.SetDefault("DatabaseUseAzureIdentity", false)
 	viper.SetDefault("CORSOrigins", []string{"*"})
 	viper.SetDefault("BasePath", "/")
 	viper.SetDefault("CacheTTL", 0)          // cache timeout in seconds
@@ -160,6 +162,20 @@ func main() {
 	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
 		viper.Set("DbConnection", dbURL)
 		log.Info("Using database connection info from environment variable DATABASE_URL")
+	}
+
+	// Azure managed-identity (Entra) database auth. The explicit
+	// DATABASE_USE_AZURE_IDENTITY flag wins; otherwise auto-detect from the
+	// Workload Identity federated token file injected into the pod.
+	useAzureIdentity := false
+	if v, ok := os.LookupEnv("DATABASE_USE_AZURE_IDENTITY"); ok {
+		useAzureIdentity, _ = strconv.ParseBool(v)
+	} else if os.Getenv("AZURE_FEDERATED_TOKEN_FILE") != "" {
+		useAzureIdentity = true
+	}
+	viper.Set("DatabaseUseAzureIdentity", useAzureIdentity)
+	if useAzureIdentity {
+		log.Info("Using Azure managed identity (Entra) for database authentication")
 	}
 
 	if err := viper.ReadInConfig(); err != nil {

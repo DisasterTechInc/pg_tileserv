@@ -2,12 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	// Azure managed identity
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 
 	// Database
 	"github.com/jackc/pgconn"
@@ -52,6 +58,14 @@ func dbConnect() (*pgxpool.Pool, error) {
 		pgxLevel, _ := pgx.LogLevelFromString(string(levelString))
 		config.ConnConfig.LogLevel = pgxLevel
 
+		// When Azure managed-identity auth is enabled, inject a fresh Entra
+		// access token as the DB password before every new connection.
+		if viper.GetBool("DatabaseUseAzureIdentity") {
+			if err = configureAzureIdentityAuth(config); err != nil {
+				log.Fatal(err)
+			}
+		}
+
 		// Connect!
 		globalDb, err = pgxpool.ConnectConfig(context.Background(), config)
 		if err != nil {
@@ -65,6 +79,51 @@ func dbConnect() (*pgxpool.Pool, error) {
 		return globalDb, err
 	}
 	return globalDb, nil
+}
+
+// azurePostgresScope is the Entra token scope for Azure Database for PostgreSQL.
+const azurePostgresScope = "https://ossrdbms-aad.database.windows.net/.default"
+
+// configureAzureIdentityAuth wires the pgx pool to authenticate to Postgres
+// using an Entra (Azure AD) access token obtained via AKS Workload Identity,
+// instead of a static password. The token is short-lived (~60 min), so it is
+// injected in BeforeConnect, which runs before every new physical connection
+// (initial connect and pool refills).
+func configureAzureIdentityAuth(config *pgxpool.Config) error {
+	opts := &azidentity.WorkloadIdentityCredentialOptions{}
+	// Optional explicit identity selection; when empty the SDK falls back to
+	// the AZURE_CLIENT_ID injected by the Workload Identity webhook. This lets
+	// a single workload choose among multiple federated identities.
+	if clientID := os.Getenv("DATABASE_AZURE_CLIENT_ID"); clientID != "" {
+		opts.ClientID = clientID
+	}
+	cred, err := azidentity.NewWorkloadIdentityCredential(opts)
+	if err != nil {
+		return fmt.Errorf("azure identity: %w", err)
+	}
+
+	// Enforce TLS (sslmode=require semantics): the token must never traverse an
+	// unencrypted connection. ParseConfig populates TLSConfig when the
+	// connection string sets sslmode; enforce it here if it did not.
+	if config.ConnConfig.TLSConfig == nil {
+		config.ConnConfig.TLSConfig = &tls.Config{
+			ServerName:         config.ConnConfig.Host,
+			InsecureSkipVerify: true,
+		}
+		log.Warn("Azure identity auth enabled without TLS in DATABASE_URL; enforcing sslmode=require")
+	}
+
+	config.BeforeConnect = func(ctx context.Context, connConfig *pgx.ConnConfig) error {
+		token, err := cred.GetToken(ctx, policy.TokenRequestOptions{
+			Scopes: []string{azurePostgresScope},
+		})
+		if err != nil {
+			return fmt.Errorf("acquire entra token: %w", err)
+		}
+		connConfig.Password = token.Token
+		return nil
+	}
+	return nil
 }
 
 func loadVersions() error {
