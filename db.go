@@ -82,8 +82,22 @@ func dbConnect() (*pgxpool.Pool, error) {
 	return globalDb, nil
 }
 
-// azurePostgresScope is the Entra token scope for Azure Database for PostgreSQL.
-const azurePostgresScope = "https://ossrdbms-aad.database.windows.net/.default"
+// defaultAzurePostgresScope is the Entra token scope for Azure Database for
+// PostgreSQL in the Azure public (commercial) cloud. Sovereign clouds use a
+// different resource host — e.g. USGovCloud is
+// https://ossrdbms-aad.database.usgovcloudapi.net/.default — so the scope is
+// overridable via DATABASE_AZURE_POSTGRES_SCOPE.
+const defaultAzurePostgresScope = "https://ossrdbms-aad.database.windows.net/.default"
+
+// azurePostgresScope returns the Entra token scope for Azure Database for
+// PostgreSQL, honoring the DATABASE_AZURE_POSTGRES_SCOPE override for sovereign
+// clouds (e.g. USGovCloud) and falling back to the public-cloud default.
+func azurePostgresScope() string {
+	if scope := os.Getenv("DATABASE_AZURE_POSTGRES_SCOPE"); scope != "" {
+		return scope
+	}
+	return defaultAzurePostgresScope
+}
 
 // configureAzureIdentityAuth wires the pgx pool to authenticate to Postgres
 // using an Entra (Azure AD) access token obtained via AKS Workload Identity,
@@ -102,6 +116,8 @@ func configureAzureIdentityAuth(config *pgxpool.Config) error {
 	if err != nil {
 		return fmt.Errorf("azure identity: %w", err)
 	}
+	scope := azurePostgresScope()
+	log.Infof("Azure identity auth: using Entra token scope %s", scope)
 
 	// Enforce verify-full TLS on every connection in identity mode: the Entra
 	// token is a bearer credential and must never traverse a connection whose
@@ -144,7 +160,7 @@ func configureAzureIdentityAuth(config *pgxpool.Config) error {
 
 	config.BeforeConnect = func(ctx context.Context, connConfig *pgx.ConnConfig) error {
 		token, err := cred.GetToken(ctx, policy.TokenRequestOptions{
-			Scopes: []string{azurePostgresScope},
+			Scopes: []string{scope},
 		})
 		if err != nil {
 			return fmt.Errorf("acquire entra token: %w", err)
