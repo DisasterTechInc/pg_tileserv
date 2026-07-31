@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"os"
@@ -102,15 +103,22 @@ func configureAzureIdentityAuth(config *pgxpool.Config) error {
 		return fmt.Errorf("azure identity: %w", err)
 	}
 
-	// Enforce TLS (sslmode=require semantics): the token must never traverse an
-	// unencrypted connection. ParseConfig populates TLSConfig when the
-	// connection string sets sslmode; enforce it here if it did not.
+	// Enforce verified TLS: the Entra token is a bearer credential and must
+	// never traverse a connection whose server identity is unverified.
+	// ParseConfig populates TLSConfig when the connection string sets sslmode;
+	// if it did not, add a verify-full config backed by the system root store
+	// (Azure's public roots ship in the runtime image's ca-certificates).
 	if config.ConnConfig.TLSConfig == nil {
-		config.ConnConfig.TLSConfig = &tls.Config{
-			ServerName:         config.ConnConfig.Host,
-			InsecureSkipVerify: true,
+		rootCAs, cerr := x509.SystemCertPool()
+		if cerr != nil {
+			return fmt.Errorf("load system cert pool for verified TLS: %w", cerr)
 		}
-		log.Warn("Azure identity auth enabled without TLS in DATABASE_URL; enforcing sslmode=require")
+		config.ConnConfig.TLSConfig = &tls.Config{
+			ServerName: config.ConnConfig.Host,
+			RootCAs:    rootCAs,
+			MinVersion: tls.VersionTLS12,
+		}
+		log.Warn("Azure identity auth enabled without sslmode in DATABASE_URL; enforcing verified TLS (sslmode=verify-full)")
 	}
 
 	config.BeforeConnect = func(ctx context.Context, connConfig *pgx.ConnConfig) error {
