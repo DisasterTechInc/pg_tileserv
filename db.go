@@ -103,23 +103,44 @@ func configureAzureIdentityAuth(config *pgxpool.Config) error {
 		return fmt.Errorf("azure identity: %w", err)
 	}
 
-	// Enforce verified TLS: the Entra token is a bearer credential and must
-	// never traverse a connection whose server identity is unverified.
-	// ParseConfig populates TLSConfig when the connection string sets sslmode;
-	// if it did not, add a verify-full config backed by the system root store
-	// (Azure's public roots ship in the runtime image's ca-certificates).
-	if config.ConnConfig.TLSConfig == nil {
-		rootCAs, cerr := x509.SystemCertPool()
-		if cerr != nil {
-			return fmt.Errorf("load system cert pool for verified TLS: %w", cerr)
+	// Enforce verify-full TLS on every connection in identity mode: the Entra
+	// token is a bearer credential and must never traverse a connection whose
+	// server identity is unverified. The sslmode parsed from DATABASE_URL is not
+	// enough to guarantee that — pgx leaves hostname verification disabled for
+	// sslmode=require and verify-ca (InsecureSkipVerify=true) and even permits a
+	// plaintext fallback for sslmode=prefer. Harden the primary connection and
+	// every fallback to verify-full, preserving any operator-supplied root CAs
+	// and defaulting to the system trust store (Azure's public roots ship in the
+	// runtime image's ca-certificates).
+	hardenTLS := func(t *tls.Config, host string) (*tls.Config, error) {
+		if t == nil {
+			t = &tls.Config{}
 		}
-		config.ConnConfig.TLSConfig = &tls.Config{
-			ServerName: config.ConnConfig.Host,
-			RootCAs:    rootCAs,
-			MinVersion: tls.VersionTLS12,
+		t.InsecureSkipVerify = false
+		if t.ServerName == "" {
+			t.ServerName = host
 		}
-		log.Warn("Azure identity auth enabled without sslmode in DATABASE_URL; enforcing verified TLS (sslmode=verify-full)")
+		if t.RootCAs == nil {
+			rootCAs, cerr := x509.SystemCertPool()
+			if cerr != nil {
+				return nil, fmt.Errorf("load system cert pool for verified TLS: %w", cerr)
+			}
+			t.RootCAs = rootCAs
+		}
+		if t.MinVersion < tls.VersionTLS12 {
+			t.MinVersion = tls.VersionTLS12
+		}
+		return t, nil
 	}
+	if config.ConnConfig.TLSConfig, err = hardenTLS(config.ConnConfig.TLSConfig, config.ConnConfig.Host); err != nil {
+		return err
+	}
+	for _, fb := range config.ConnConfig.Fallbacks {
+		if fb.TLSConfig, err = hardenTLS(fb.TLSConfig, fb.Host); err != nil {
+			return err
+		}
+	}
+	log.Info("Azure identity auth: enforcing verify-full TLS on all Postgres connections")
 
 	config.BeforeConnect = func(ctx context.Context, connConfig *pgx.ConnConfig) error {
 		token, err := cred.GetToken(ctx, policy.TokenRequestOptions{

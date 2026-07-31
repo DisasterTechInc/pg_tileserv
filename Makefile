@@ -1,6 +1,6 @@
 ##AVAILABLE BUILD OPTIONS -
 ##      APPVERSION - Variable to set the version label
-##      GOVERSION - Defaults to 1.21.6 but can be overriden, uses alpine go container as base
+##      GOVERSION - Defaults to 1.25.0 but can be overriden, uses alpine go container as base
 ##      PROGRAM - Name of binary, pg_tileserv
 ##      CONTAINER - prefix and name of the generated container
 ##      CONFIG - config file to be used
@@ -11,7 +11,7 @@
 ##      IMAGE_TAG - The tag to be applied to the container
 
 APPVERSION ?= latest
-GOVERSION ?= 1.24.13
+GOVERSION ?= 1.25.0
 PROGRAM ?= pg_tileserv
 CONFIG ?= config/$(PROGRAM).toml
 CONTAINER ?= pramsey/$(PROGRAM)
